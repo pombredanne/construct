@@ -1,7 +1,7 @@
 from struct import Struct as Packer
 
 from lib import StringIO
-from lib import Container, ListContainer, AttrDict, LazyContainer
+from lib import Container, ListContainer, LazyContainer
 
 
 #===============================================================================
@@ -188,7 +188,7 @@ class Construct(object):
         by this method.
         """
 
-        return self._parse(stream, AttrDict())
+        return self._parse(stream, Container())
 
     def _parse(self, stream, context):
         """
@@ -211,7 +211,7 @@ class Construct(object):
         Build an object directly into a stream.
         """
 
-        self._build(obj, stream, AttrDict())
+        self._build(obj, stream, Container())
 
     def _build(self, obj, stream, context):
         """
@@ -235,7 +235,7 @@ class Construct(object):
         """
 
         if context is None:
-            context = AttrDict()
+            context = Container()
         try:
             return self._sizeof(context)
         except Exception, e:
@@ -250,12 +250,13 @@ class Construct(object):
 
 class Subconstruct(Construct):
     """
-    Abstract subconstruct (wraps an inner construct, inheriting it's
-    name and flags).
+    Abstract parent class of all subconstructs.
 
-    Parameters:
-    * subcon - the construct to wrap
+    Subconstructs wrap an inner Construct, inheriting its name and flags.
+
+    :param ``Construct`` subcon: the construct to wrap
     """
+
     __slots__ = ["subcon"]
     def __init__(self, subcon):
         Construct.__init__(self, subcon.name, subcon.conflags)
@@ -269,11 +270,13 @@ class Subconstruct(Construct):
 
 class Adapter(Subconstruct):
     """
-    Abstract adapter: calls _decode for parsing and _encode for building.
+    Abstract adapter parent class.
 
-    Parameters:
-    * subcon - the construct to wrap
+    Adapters should implement ``_decode()`` and ``_encode()``.
+
+    :param ``Construct`` subcon: the construct to wrap
     """
+
     __slots__ = []
     def _parse(self, stream, context):
         return self._decode(self.subcon._parse(stream, context), context)
@@ -453,25 +456,20 @@ class Range(Subconstruct):
     The general-case repeater. Repeats the given unit for at least mincount
     times, and up to maxcount times. If an exception occurs (EOF, validation
     error), the repeater exits. If less than mincount units have been
-    successfully parsed, a RepeaterError is raised.
+    successfully parsed, a RangeError is raised.
 
     .. note::
        This object requires a seekable stream for parsing.
 
-    Parameters:
+    :param int mincount: the minimal count
+    :param int maxcount: the maximal count
+    :param Construct subcon: the subcon to repeat
 
-     * mincount - the minimal count (an integer)
-     * maxcount - the maximal count (an integer)
-     * subcon - the subcon to repeat
-
-    Example:
-    Range(5, 8, UBInt8("foo"))
-
-    >>> c = Repeater(3, 7, UBInt8("foo"))
+    >>> c = Range(3, 7, UBInt8("foo"))
     >>> c.parse("\\x01\\x02")
     Traceback (most recent call last):
       ...
-    construct.core.RepeaterError: expected 3..7, found 2
+    construct.core.RangeError: expected 3..7, found 2
     >>> c.parse("\\x01\\x02\\x03")
     [1, 2, 3]
     >>> c.parse("\\x01\\x02\\x03\\x04\\x05\\x06")
@@ -483,13 +481,13 @@ class Range(Subconstruct):
     >>> c.build([1,2])
     Traceback (most recent call last):
       ...
-    construct.core.RepeaterError: expected 3..7, found 2
+    construct.core.RangeError: expected 3..7, found 2
     >>> c.build([1,2,3,4])
     '\\x01\\x02\\x03\\x04'
     >>> c.build([1,2,3,4,5,6,7,8])
     Traceback (most recent call last):
       ...
-    construct.core.RepeaterError: expected 3..7, found 8
+    construct.core.RangeError: expected 3..7, found 8
     """
 
     __slots__ = ["mincount", "maxcout"]
@@ -641,7 +639,7 @@ class Struct(Construct):
         else:
             obj = Container()
             if self.nested:
-                context = AttrDict(_ = context)
+                context = Container(_ = context)
         for sc in self.subcons:
             if sc.conflags & self.FLAG_EMBED:
                 context["<obj>"] = obj
@@ -656,7 +654,7 @@ class Struct(Construct):
         if "<unnested>" in context:
             del context["<unnested>"]
         elif self.nested:
-            context = AttrDict(_ = context)
+            context = Container(_ = context)
         for sc in self.subcons:
             if sc.conflags & self.FLAG_EMBED:
                 context["<unnested>"] = True
@@ -669,7 +667,7 @@ class Struct(Construct):
             sc._build(subobj, stream, context)
     def _sizeof(self, context):
         if self.nested:
-            context = AttrDict(_ = context)
+            context = Container(_ = context)
         return sum(sc._sizeof(context) for sc in self.subcons)
 
 class Sequence(Struct):
@@ -701,7 +699,7 @@ class Sequence(Struct):
         else:
             obj = ListContainer()
             if self.nested:
-                context = AttrDict(_ = context)
+                context = Container(_ = context)
         for sc in self.subcons:
             if sc.conflags & self.FLAG_EMBED:
                 context["<obj>"] = obj
@@ -716,7 +714,7 @@ class Sequence(Struct):
         if "<unnested>" in context:
             del context["<unnested>"]
         elif self.nested:
-            context = AttrDict(_ = context)
+            context = Container(_ = context)
         objiter = iter(obj)
         for sc in self.subcons:
             if sc.conflags & self.FLAG_EMBED:
@@ -1156,28 +1154,24 @@ class Reconfig(Subconstruct):
 
 class Anchor(Construct):
     """
-    Returns the "anchor" (stream position) at the point where it's inserted.
-    Useful for adjusting relative offsets to absolute positions, or to measure
-    sizes of constructs.
-    absolute pointer = anchor + relative offset
-    size = anchor_after - anchor_before
-    See also Pointer.
+    The **anchor**, or stream position at a point in a Construct.
 
-    Notes:
-    * requires a seekable stream.
+    Anchors are useful for adjusting relative offsets to absolute positions,
+    or to measure sizes of Constructs.
 
-    Parameters:
-    * name - the name of the anchor
+    To get an absolute pointer, use an Anchor plus a relative offset. To get a
+    size, place two Anchors and measure their difference.
 
-    Example:
-    Struct("foo",
-        Anchor("base"),
-        UBInt8("relative_offset"),
-        Pointer(lambda ctx: ctx.relative_offset + ctx.base,
-            UBInt8("data")
-        )
-    )
+    :param str name: the name of the anchor
+
+    .. note::
+
+       Anchor requires a seekable stream, or at least a tellable stream; it is
+       implemented using the ``tell()`` method of file-like objects.
+
+    .. seealso:: Pointer
     """
+
     __slots__ = []
     def _parse(self, stream, context):
         return stream.tell()
